@@ -2,7 +2,6 @@
 import multiprocessing
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
-
 import urllib3
 from requests.exceptions import SSLError
 import argparse
@@ -176,7 +175,7 @@ def main(args):
         with open(str(args.input), 'r') as file:
             ip_list = [line.strip('\n').split('//')[-1] for line in file.readlines()]
         valid_ips = process_ip_list(ip_list)
-        file = open(str(args.output), 'w+')
+        file = open(str(args.output), 'a+')
         for ip in valid_ips:
             print(ip)
             file.write(ip + '\n')
@@ -210,7 +209,7 @@ def main(args):
         # 将 frozenset 转换回字典列表
         unique_list_of_dicts = [dict(d) for d in unique_dicts]
         for item in unique_list_of_dicts:
-            file = open(item["route"] + '_list.txt', "w+")
+            file = open(item["route"] + '_list.txt', "a+")
             file.write(f"{item['ip']}\n")
             file.close()
             # 同样，因为重复问题 暂时用try-except兜住了
@@ -219,7 +218,7 @@ def main(args):
             except ValueError:
                 continue
 
-        file = open('normal_list.txt', 'w+')
+        file = open('normal_list.txt', 'a+')
         for item in targets:
             file.write(f"{item}\n")
         file.close()
