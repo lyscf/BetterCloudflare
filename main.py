@@ -14,12 +14,27 @@ from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPSConnection
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pythonping import ping
+
+# 定义两个列表来分别存储延迟和丢包数据
+latency_data = []
+loss_data = []
 
 # 禁用 urllib3 的警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 colo_list = []
+
 speedtest_result = []
+
+
+def thread_ping(ip):
+    ping_result = ping(ip)
+    latency = format(ping_result.rtt_avg * 1000, '.2f')  # 转换为毫秒并保留两位小数
+    loss = (ping_result.stats_packets_lost) / 4  # 计算丢包率
+    # 将数据添加到对应的列表中
+    latency_data.append((ip, float(latency)))  # 存储为元组，便于排序
+    loss_data.append((ip, loss))
 
 
 class CustomHTTPSAdapter(HTTPAdapter):
@@ -39,17 +54,15 @@ class CustomHTTPSAdapter(HTTPAdapter):
         request.assert_hostname = self.hostname
 
 
-# ... 你的自定义适配器代码 ...
 
-# 定义一个函数来执行测速
-def speed_test(url, ip, port, hostname, length,timeout):
+def speed_test(url, ip, port, hostname, length, timeout):
     session = requests.Session()
     adapter = CustomHTTPSAdapter(hostname=hostname, ip=ip, port=port)
     session.mount(f'https://{hostname}', adapter)
 
     try:
         start_time = time.time()
-        response = session.get(url,timeout=int(timeout))
+        response = session.get(url, timeout=int(timeout))
         # 确保请求成功
         if response.status_code == 200:
             end_time = time.time()
@@ -184,6 +197,7 @@ def check_colo(ip):
         return None
 
 
+
 def worker(ip):
     colo_list.append({"ip": ip, "colo": check_colo(ip)})
 
@@ -286,8 +300,10 @@ def main(args):
         timeout = args.timeout
         # 使用ThreadPoolExecutor创建线程池
         with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-            future_to_node = {executor.submit(speed_test, node['url'], node['ip'], node['port'], node['hostname'],length,timeout): node
-                              for node in nodes}
+            future_to_node = {
+                executor.submit(speed_test, node['url'], node['ip'], node['port'], node['hostname'], length,
+                                timeout): node
+                for node in nodes}
 
             # 等待所有任务完成
             for future in as_completed(future_to_node):
@@ -304,6 +320,37 @@ def main(args):
                 file.write('IP:' + str(item['ip']) + '     Speed:' + str(format(float(item['speed']), '.2f')) + 'M/S\n')
             file.close()
 
+    elif args.latency:
+        print('latency & loss')
+        file = open(str(args.input), 'r')
+        ips = [line.strip('\n') for line in file]  # 读取所有IP地址到列表中
+        file.close()
+
+        # 创建一个线程列表
+        threads = []
+        # 对每个IP地址创建一个线程
+        for ip in ips:
+            thread = Thread(target=thread_ping, args=(ip,))
+            threads.append(thread)
+            thread.start()  # 启动线程
+
+        # 等待所有线程完成
+        for thread in threads:
+            thread.join()
+
+        # 分别对延迟和丢包数据进行排序
+        sorted_latency_data = sorted(latency_data, key=lambda x: x[1])
+        sorted_loss_data = sorted(loss_data, key=lambda x: x[1])
+
+        file = open('latency_data.txt', 'w+')
+        for ip, latency in sorted_latency_data:
+            file.write(f"{ip}: {latency} ms \n")
+        file.close()
+
+        file = open('loss_data.txt', 'w+')
+        for ip, loss in sorted_loss_data:
+            file.write(f"{ip}: {loss * 100}% \n")
+        file.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Network traceroute and quality checking tool.')
@@ -321,8 +368,10 @@ if __name__ == "__main__":
     parser.add_argument('-S', '--speedtest', action='store_true',
                         help='Perform route trace for each target in the input file.')
 
-    parser.add_argument('-ip2asn_db', type=str, default='ip2asn-v4-u32.tsv', help='Path to the IP2ASN database file.')
+    parser.add_argument('-L', '--latency', action='store_true',
+                        help='Perform latency and package loss for each target in the input file.')
 
+    parser.add_argument('-ip2asn_db', type=str, default='ip2asn-v4-u32.tsv', help='Path to the IP2ASN database file.')
 
     parser.add_argument('-length', type=int, default=10, help='File length for speedtest,default 10(MB). 5,10,'
                                                               '20 supported')
@@ -334,7 +383,7 @@ if __name__ == "__main__":
     if not os.path.isfile(args.input):
         print(f"Error: Input file '{args.input}' not found.")
         exit(1)
-    if (not args.route) and (not args.output):
+    if (not (args.route or args.latency)) and (not args.output):
         print(f"Error: Output file not specified.")
         exit(1)
     main(args)
