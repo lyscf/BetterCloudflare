@@ -1,7 +1,6 @@
 # coding:utf-8
 import multiprocessing
 from threading import Thread
-from concurrent.futures import ThreadPoolExecutor
 import urllib3
 from requests.exceptions import SSLError
 import argparse
@@ -11,10 +10,57 @@ import ip2asn
 import logging
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPSConnection
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 禁用 urllib3 的警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 colo_list = []
+speedtest_result = []
+
+
+class CustomHTTPSAdapter(HTTPAdapter):
+    def __init__(self, hostname, ip, port=443, *args, **kwargs):
+        self.hostname = hostname
+        self.ip = ip
+        self.port = port
+        super(CustomHTTPSAdapter, self).__init__(*args, **kwargs)
+
+    def get_connection(self, url, proxies=None):
+        # 直接使用IP地址和端口创建HTTPS连接
+        return HTTPSConnection(host=self.ip, port=self.port)
+
+    def add_certs(self, request):
+        # 禁用SSL证书验证
+        request.cert_reqs = 'CERT_NONE'
+        request.assert_hostname = self.hostname
+
+
+# ... 你的自定义适配器代码 ...
+
+# 定义一个函数来执行测速
+def speed_test(url, ip, port, hostname, length,timeout):
+    session = requests.Session()
+    adapter = CustomHTTPSAdapter(hostname=hostname, ip=ip, port=port)
+    session.mount(f'https://{hostname}', adapter)
+
+    try:
+        start_time = time.time()
+        response = session.get(url,timeout=int(timeout))
+        # 确保请求成功
+        if response.status_code == 200:
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            speed = length / elapsed_time if elapsed_time > 0 else 0
+            print(f"节点 {ip} 测速结果：{elapsed_time:.2f} 秒, 平均速度：{speed:.2f} M/S")
+            speedtest_result.append({'ip': ip, 'speed': speed})
+        else:
+            print(f"节点 {ip} 请求失败，状态码：{response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"节点 {ip} 请求异常：{e}")
 
 
 class TracerouteLib:
@@ -171,7 +217,8 @@ def main(args):
                 print('IP:', item['ip'], 'Colo:', item['colo'])
                 file.write('IP:' + item['ip'] + ' Colo:' + item['colo'] + '\n')
         file.close()
-    elif args.ip_list:
+
+    elif args.node_list:
         with open(str(args.input), 'r') as file:
             ip_list = [line.strip('\n').split('//')[-1] for line in file.readlines()]
         valid_ips = process_ip_list(ip_list)
@@ -179,6 +226,7 @@ def main(args):
         for ip in valid_ips:
             print(ip)
             file.write(ip + '\n')
+
     elif args.route:
         print('routecheck')
         targets = []  # 这里填入你的目标主机列表
@@ -224,6 +272,38 @@ def main(args):
         file.close()
         print('SUCCESS!')
 
+    elif args.speedtest:
+        print('speedtest')
+        file = open(str(args.input), 'r')
+        length = int(args.length)
+        nodes = []
+        for line in file:
+            nodes.append({"url": f"https://speedtest.sese.pics/{str(length)}M.dat", "ip": line.strip('\n'), "port": 443,
+                          "hostname": "speedtest.sese.pics"})
+
+        # 定义最大线程数
+        MAX_THREADS = int(args.threads)
+        timeout = args.timeout
+        # 使用ThreadPoolExecutor创建线程池
+        with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+            future_to_node = {executor.submit(speed_test, node['url'], node['ip'], node['port'], node['hostname'],length,timeout): node
+                              for node in nodes}
+
+            # 等待所有任务完成
+            for future in as_completed(future_to_node):
+                try:
+                    node = future_to_node[future]
+                    future.result()  # 获取结果，如果任务抛出异常，将会在这里被抛出
+                    # 这里可以添加处理结果的代码
+                except Exception as e:
+                    print(f"节点 {node['ip']} 测速失败: {e}")
+
+            file = open(str(args.output), 'w+')
+            speedtest_result.sort(key=lambda x: x['speed'], reverse=True)
+            for item in speedtest_result:
+                file.write('IP:' + str(item['ip']) + '     Speed:' + str(format(float(item['speed']), '.2f')) + 'M/S\n')
+            file.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Network traceroute and quality checking tool.')
@@ -231,17 +311,30 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', required=False, type=str, help='Output file to store the results.')
 
     parser.add_argument('-C', '--colo', action='store_true', help='Colo check mode.')
-    parser.add_argument('-I', '--ip_list', action='store_true',
-                        help='Chek and Process the list of IPs from the input file.')
+
+    parser.add_argument('-N', '--node_list', action='store_true',
+                        help='Chek and Process the list of nodes from the input file.')
+
     parser.add_argument('-R', '--route', action='store_true',
                         help='Perform route trace for each target in the input file.')
 
-    parser.add_argument('-ip2asn_db', type=str, default='ip2asn-v4-u32.tsv', help='Path to the IP2ASN database file.')
-    # parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads for route tracing.')
+    parser.add_argument('-S', '--speedtest', action='store_true',
+                        help='Perform route trace for each target in the input file.')
 
+    parser.add_argument('-ip2asn_db', type=str, default='ip2asn-v4-u32.tsv', help='Path to the IP2ASN database file.')
+
+
+    parser.add_argument('-length', type=int, default=10, help='File length for speedtest,default 10(MB). 5,10,'
+                                                              '20 supported')
+    parser.add_argument('--threads', type=int, default=10, help='Threads for speedtest,default 10,CHANGE WITH '
+                                                                'CAUTION(ESPECIALLY WHEN YOUR BANDWIDTH IS LOW)')
+    parser.add_argument('--timeout', type=int, default=30, help='Timeout for speedtest default 10')
     args = parser.parse_args()
 
     if not os.path.isfile(args.input):
         print(f"Error: Input file '{args.input}' not found.")
+        exit(1)
+    if (not args.route) and (not args.output):
+        print(f"Error: Output file not specified.")
         exit(1)
     main(args)
